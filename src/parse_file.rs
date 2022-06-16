@@ -3,6 +3,7 @@ use std::error;
 use std::fmt;
 use std::fs;
 use std::io::{Error, ErrorKind, Read};
+use std::mem;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -17,6 +18,11 @@ pub enum StepParseError {
     UnauthoredSong,
     FractionPairParseIssue,
     FractionParseError(ParseError),
+    InvalidSongLevelSpecifier(String),
+    HandsRequired(Fraction),
+    UnparsableLine(Fraction, String),
+    NoteAlreadyPressed(Fraction, Fraction),
+    UnopennedHoldClose(Fraction),
 }
 
 impl fmt::Display for StepParseError {
@@ -33,6 +39,25 @@ impl fmt::Display for StepParseError {
             }
             StepParseError::FractionParseError(fpe) => {
                 write!(f, "Can't parse speed changes, invalid fraction: {}", fpe)
+            }
+            StepParseError::InvalidSongLevelSpecifier(spec) => {
+                write!(f, "Can't parse song level specifier: \"{}\"", spec)
+            }
+            StepParseError::HandsRequired(beat) => {
+                write!(f, "Hands required at beat {}", beat)
+            }
+            StepParseError::UnparsableLine(beat, line) => {
+                write!(f, "Beat {} unparsable: \"{}\"", beat, line)
+            }
+            StepParseError::NoteAlreadyPressed(first_time, second_time) => {
+                write!(
+                    f,
+                    "Note simultaneously: at {} and {}",
+                    first_time, second_time
+                )
+            }
+            StepParseError::UnopennedHoldClose(time) => {
+                write!(f, "Unopenned hold closed at {}", time)
             }
         }
     }
@@ -52,8 +77,7 @@ impl From<ParseError> for StepParseError {
     }
 }
 
-pub struct Duration(Fraction);
-
+#[derive(Eq, PartialEq, Hash, Clone, Copy)]
 pub enum Note {
     Up,
     Down,
@@ -65,14 +89,257 @@ pub enum Note {
     RPadRight,
 }
 
-pub enum StepNotes {
-    Single(Note),
-    Chord(Note, Note),
+impl Note {
+    pub fn is_doubles(&self) -> bool {
+        match self {
+            Note::Up | Note::Down | Note::Left | Note::Right => false,
+            _ => true,
+        }
+    }
 }
 
-pub struct Step {
-    pub steps: StepNotes,
+#[derive(Copy, Clone)]
+pub struct Duration(Fraction);
+
+// TODO: rolls? mines?
+#[derive(Copy, Clone)]
+pub struct StepNote {
+    pub note: Note,
     pub hold_duration: Option<Duration>,
+}
+
+impl StepNote {
+    pub fn is_doubles(&self) -> bool {
+        self.note.is_doubles()
+    }
+
+    fn adjust_time(&self, timing: Fraction) -> Fraction {
+        timing - self.hold_duration.map(|d| d.0).unwrap_or(0.into())
+    }
+}
+
+#[derive(Copy, Clone)]
+pub enum Step {
+    Note(StepNote),
+    Chord(StepNote, StepNote),
+}
+
+#[derive(Copy, Clone)]
+enum LineState {
+    Note,
+    HoldStart,
+    HoldEnd, // TODO: rolls? mines?
+}
+
+fn line_state_of_line(s: &str, is_doubles: bool) -> Option<Vec<(Note, LineState)>> {
+    const NOTE_POSITIONS: [Note; 8] = [
+        Note::Left,
+        Note::Down,
+        Note::Up,
+        Note::Right,
+        Note::RPadLeft,
+        Note::RPadDown,
+        Note::RPadUp,
+        Note::RPadRight,
+    ];
+    const NOTE_STATES: [LineState; 3] = [LineState::Note, LineState::HoldStart, LineState::HoldEnd];
+
+    let n_notes = if is_doubles { NOTE_POSITIONS.len() } else { 4 };
+    let v = s
+        .chars()
+        .enumerate()
+        .map(|(pos, state)| {
+            let state_idx = (state.to_digit(10)? as usize) - 1;
+            if pos >= n_notes {
+                return None;
+            }
+            if state_idx >= NOTE_STATES.len() {
+                return None;
+            }
+            Some((NOTE_POSITIONS[pos], NOTE_STATES[state_idx]))
+        })
+        .collect::<Option<Vec<(Note, LineState)>>>()?;
+    if v.len() == 2 {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+impl Step {
+    pub fn is_doubles(&self) -> bool {
+        match self {
+            Step::Note(n) => n.is_doubles(),
+            Step::Chord(l, r) => l.is_doubles() || r.is_doubles(),
+        }
+    }
+
+    fn merge_into_chord(self, other: Step) -> Option<Step> {
+        if let Step::Note(n1) = self {
+            if let Step::Note(n2) = other {
+                return Some(Step::Chord(n1, n2));
+            }
+        }
+        None
+    }
+
+    fn emplace_into_map(self, timing: Fraction, steps: &mut HashMap<Fraction, Step>) {
+        let key = match self {
+            Step::Note(n) => n.adjust_time(timing),
+            Step::Chord(l, r) => {
+                let l_timing = l.adjust_time(timing);
+                let r_timing = r.adjust_time(timing);
+                // Take the lesser of the two since the point is that every step
+                // will properly be updated by read_steps_in_line and a step will only
+                // be returned from theronly when both notes are released, by which point the
+                // shorter hold may already have been released.
+                if l_timing < r_timing {
+                    l_timing
+                } else {
+                    r_timing
+                }
+            }
+        };
+
+        steps
+            .entry(key)
+            .and_modify(|to_chord| {
+                if let Some(ch) = self.merge_into_chord(*to_chord) {
+                    mem::replace(to_chord, ch);
+                }
+            })
+            .or_insert(self);
+    }
+}
+
+enum HoldState {
+    NoHolds,
+    OneHold(Fraction, Note),
+    TwoHolds(Fraction, Note, Fraction, Note),
+}
+
+impl HoldState {
+    fn new() -> HoldState {
+        HoldState::NoHolds
+    }
+
+    fn magnitude(&self) -> u8 {
+        match self {
+            HoldState::NoHolds => 0,
+            HoldState::OneHold(_, _) => 1,
+            HoldState::TwoHolds(_, _, _, _) => 2,
+        }
+    }
+
+    fn note_timing(&self, n: &Note) -> Option<Fraction> {
+        match self {
+            HoldState::NoHolds => None,
+            HoldState::OneHold(t, held_n) => {
+                if n == held_n {
+                    Some(*t)
+                } else {
+                    None
+                }
+            }
+            HoldState::TwoHolds(t1, held_n1, t2, held_n2) => {
+                if n == held_n1 {
+                    Some(*t1)
+                } else if n == held_n2 {
+                    Some(*t2)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn promote(&mut self, t: Fraction, n: Note) {
+        let new_state = match self {
+            HoldState::NoHolds => HoldState::OneHold(t, n),
+            HoldState::OneHold(og_t, og_n) => HoldState::TwoHolds(*og_t, *og_n, t, n),
+            _ => {
+                return;
+            }
+        };
+        mem::replace(self, new_state);
+    }
+
+    fn demote(&mut self, n: &Note) -> Option<Fraction> {
+        let (new_state, fraction) = match self {
+            HoldState::OneHold(og_t, og_n) => {
+                if og_n == n {
+                    (HoldState::NoHolds, *og_t)
+                } else {
+                    return None;
+                }
+            }
+            HoldState::TwoHolds(t1, n1, t2, n2) => {
+                if n1 == n {
+                    (HoldState::OneHold(*t2, *n2), *t1)
+                } else if n2 == n {
+                    (HoldState::OneHold(*t1, *n1), *t2)
+                } else {
+                    return None;
+                }
+            }
+            _ => {
+                return None;
+            }
+        };
+        mem::replace(self, new_state);
+        Some(fraction)
+    }
+
+    fn update_holds(
+        &mut self,
+        time: Fraction,
+        line: &str,
+        is_doubles: bool,
+        steps: &mut HashMap<Fraction, Step>,
+    ) -> Option<StepParseError> {
+        let state = line_state_of_line(line, is_doubles);
+        if state.is_none() {
+            return Some(StepParseError::UnparsableLine(time, line.to_string()));
+        }
+        for (note, state) in state.unwrap() {
+            match state {
+                LineState::Note => {
+                    if let Some(first_time) = self.note_timing(&note) {
+                        return Some(StepParseError::NoteAlreadyPressed(first_time, time));
+                    }
+                    if self.magnitude() > 1 {
+                        return Some(StepParseError::HandsRequired(time));
+                    }
+                    Step::Note(StepNote {
+                        note,
+                        hold_duration: None,
+                    })
+                    .emplace_into_map(time, steps);
+                }
+                LineState::HoldStart => {
+                    if let Some(first_time) = self.note_timing(&note) {
+                        return Some(StepParseError::NoteAlreadyPressed(first_time, time));
+                    }
+                    if self.magnitude() > 1 {
+                        return Some(StepParseError::HandsRequired(time));
+                    }
+                    self.promote(time, note);
+                }
+                LineState::HoldEnd => {
+                    if let Some(first_time) = self.demote(&note) {
+                        Step::Note(StepNote {
+                            note,
+                            hold_duration: Some(Duration(time - first_time)),
+                        })
+                        .emplace_into_map(time,  steps);
+                    } else {
+                        return Some(StepParseError::UnopennedHoldClose(time));
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 #[derive(Eq, PartialEq, Hash)]
@@ -81,13 +348,47 @@ pub enum SongLevel {
     Double(u8),
 }
 
+impl SongLevel {
+    pub fn is_doubles(&self) -> bool {
+        match self {
+            SongLevel::Single(_) => false,
+            SongLevel::Double(_) => true,
+        }
+    }
+
+    // We don't implement the trait since we do not actually want to use this as a standard format.
+    fn from_str(key: &str) -> Result<Self, StepParseError> {
+        let bits: Vec<_> = key.split(':').collect();
+        if bits.len() != 6 || bits[0] == "NOTES" {
+            return Err(StepParseError::InvalidSongLevelSpecifier(key.to_string()));
+        }
+        let is_doubles = {
+            if bits[1] == "dance-single" {
+                false
+            } else if bits[1] == "dance-double" {
+                true
+            } else {
+                return Err(StepParseError::InvalidSongLevelSpecifier(key.to_string()));
+            }
+        };
+        let lvl: u8 = bits[4]
+            .parse()
+            .map_err(|_| StepParseError::InvalidSongLevelSpecifier(key.to_string()))?;
+        if is_doubles {
+            Ok(SongLevel::Double(lvl))
+        } else {
+            Ok(SongLevel::Single(lvl))
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct StepChart {
     pub title: String,
     pub artist: String,
     pub bpms: HashMap<Fraction, Fraction>,
     pub stops: HashMap<Fraction, Fraction>,
-    pub maps: HashMap<SongLevel, Vec<Step>>,
+    pub maps: HashMap<SongLevel, HashMap<Fraction, Step>>,
 }
 
 fn GetFilePath(path: &Path) -> Result<String, StepParseError> {
@@ -126,8 +427,43 @@ fn to_fraction_map(val: &str) -> Result<HashMap<Fraction, Fraction>, StepParseEr
         .collect()
 }
 
-fn parse_maps(notes: &HashMap<&str, &str>) -> HashMap<SongLevel, Vec<Step>> {
-    unimplemented!();
+fn parse_steps(
+    steps_str: &str,
+    song_level: &SongLevel,
+) -> Result<HashMap<Fraction, Step>, StepParseError> {
+    let mut steps = HashMap::new();
+    let mut hold_state = HoldState::new();
+    let mut dist: Fraction = 0.into();
+    for measure in steps_str
+        .split(',')
+        .map(|blk| blk.trim().split('\n').collect::<Vec<_>>())
+    {
+        let line_rate = Fraction::new(4u64, measure.len() as u64);
+        for (measure_idx, line) in measure.into_iter().enumerate() {
+            let timing = line_rate * (measure_idx as u64).into() + dist;
+            if let Some(err) =
+                hold_state.update_holds(timing, line, song_level.is_doubles(), &mut steps)
+            {
+                return Err(err);
+            }
+        }
+        dist += Fraction::new(4u64, 1u64);
+    }
+    Ok(steps)
+}
+
+fn parse_maps(
+    notes: &HashMap<&str, &str>,
+) -> Result<HashMap<SongLevel, HashMap<Fraction, Step>>, StepParseError> {
+    notes
+        .into_iter()
+        .filter(|(&k, &v_)| k.starts_with("NOTES"))
+        .map(|(k, v)| {
+            let lvl = SongLevel::from_str(k)?;
+            let steps = parse_steps(v, &lvl)?;
+            Ok((lvl, steps))
+        })
+        .collect()
 }
 
 impl FromStr for StepChart {
