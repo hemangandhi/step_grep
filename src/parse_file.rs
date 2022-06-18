@@ -10,12 +10,13 @@ use std::str::FromStr;
 use fraction::error::ParseError;
 use fraction::Fraction;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum StepParseError {
     NonSmFile(String),
     BadOsStr(String),
     UntitledSong,
     UnauthoredSong,
+    MissingBpm,
     FractionPairParseIssue,
     FractionParseError(ParseError),
     InvalidSongLevelSpecifier(String),
@@ -34,6 +35,7 @@ impl fmt::Display for StepParseError {
             }
             StepParseError::UntitledSong => write!(f, "Found song without title"),
             StepParseError::UnauthoredSong => write!(f, "Found song without author"),
+            StepParseError::MissingBpm => write!(f, "Found song without BPM"),
             StepParseError::FractionPairParseIssue => {
                 write!(f, "Can't parse speed changes, invalid pair")
             }
@@ -77,7 +79,7 @@ impl From<ParseError> for StepParseError {
     }
 }
 
-#[derive(Eq, PartialEq, Hash, Clone, Copy)]
+#[derive(Eq, PartialEq, Hash, Clone, Copy, Debug)]
 pub enum Note {
     Up,
     Down,
@@ -98,11 +100,11 @@ impl Note {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct Duration(Fraction);
 
 // TODO: rolls? mines?
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct StepNote {
     pub note: Note,
     pub hold_duration: Option<Duration>,
@@ -118,7 +120,7 @@ impl StepNote {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum Step {
     Note(StepNote),
     Chord(StepNote, StepNote),
@@ -331,7 +333,7 @@ impl HoldState {
                             note,
                             hold_duration: Some(Duration(time - first_time)),
                         })
-                        .emplace_into_map(time,  steps);
+                        .emplace_into_map(time, steps);
                     } else {
                         return Some(StepParseError::UnopennedHoldClose(time));
                     }
@@ -342,7 +344,7 @@ impl HoldState {
     }
 }
 
-#[derive(Eq, PartialEq, Hash)]
+#[derive(Eq, PartialEq, Hash, Debug)]
 pub enum SongLevel {
     Single(u8),
     Double(u8),
@@ -382,7 +384,7 @@ impl SongLevel {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct StepChart {
     pub title: String,
     pub artist: String,
@@ -422,7 +424,7 @@ fn to_fraction_map(val: &str) -> Result<HashMap<Fraction, Fraction>, StepParseEr
             let delim = pair
                 .find('=')
                 .ok_or(StepParseError::FractionPairParseIssue)?;
-            Ok((pair[..delim].parse()?, pair[delim..].parse()?))
+            Ok((pair[..delim].parse()?, pair[(delim + 1)..].parse()?))
         })
         .collect()
 }
@@ -473,26 +475,31 @@ impl FromStr for StepChart {
         let parts: HashMap<&str, &str> = s
             .split('#')
             .filter_map(|ln| {
+                // TODO: detect the comment line at the top of the file
+                // so that this can actually produce an error if these
+                // tokens are missing.
                 let kv = &ln[..ln.find(';')?];
                 let last_colon = kv.rfind(':')?;
                 Some(kv.split_at(last_colon + 1))
             })
             .collect();
         let mut final_chart: StepChart = Default::default();
-        final_chart.artist = parts
-            .get("ARTIST:")
-            .ok_or(StepParseError::UnauthoredSong)?
-            .to_string();
         final_chart.title = parts
             .get("TITLE:")
             .ok_or(StepParseError::UntitledSong)?
             .to_string();
-        if let Some(&bpm_str) = parts.get("BPMS:") {
-            final_chart.bpms = to_fraction_map(bpm_str)?;
+        final_chart.artist = parts
+            .get("ARTIST:")
+            .ok_or(StepParseError::UnauthoredSong)?
+            .to_string();
+        final_chart.bpms = to_fraction_map(parts.get("BPMS:").ok_or(StepParseError::MissingBpm)?)?;
+        if final_chart.bpms.is_empty() {
+            return Err(StepParseError::MissingBpm);
         }
         if let Some(&stop_str) = parts.get("STOPS:") {
             final_chart.stops = to_fraction_map(stop_str)?;
         }
+        final_chart.maps = parse_maps(&parts)?;
         Ok(final_chart)
     }
 }
@@ -500,4 +507,185 @@ impl FromStr for StepChart {
 pub struct SongPack {
     pub name: String,
     pub songs: Vec<StepChart>,
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_lacking_title() {
+        let file = "
+//----- song ID: pure -----//
+#ARTIST:PHQUASE;
+#TITLETRANSLIT:Plain Asia -PHQ remix-;
+#BANNER:Plain Asia -PHQ remix-.png;
+#BACKGROUND:Plain Asia -PHQ remix--bg.png;
+#CDTITLE:./CDTitles/BEMANI x Toho Project Ultimate MasterPieces (2015).png;
+#MUSIC:Plain Asia -PHQ remix-.ogg;
+#SAMPLESTART:34.935;
+#SAMPLELENGTH:15;
+#BPMS:0=182;
+
+#NOTES:
+     dance-single:
+     :
+     Beginner:
+     5:
+     :
+0000
+0000
+0000
+0000
+";
+        let parsed = file.parse::<StepChart>();
+        assert_eq!(parsed.unwrap_err(), StepParseError::UntitledSong);
+    }
+
+    #[test]
+    fn test_lacking_artist() {
+        let file = "
+//----- song ID: pure -----//
+#TITLE:プレインエイジア -PHQ remix-;
+#TITLETRANSLIT:Plain Asia -PHQ remix-;
+#BANNER:Plain Asia -PHQ remix-.png;
+#BACKGROUND:Plain Asia -PHQ remix--bg.png;
+#CDTITLE:./CDTitles/BEMANI x Toho Project Ultimate MasterPieces (2015).png;
+#MUSIC:Plain Asia -PHQ remix-.ogg;
+#SAMPLESTART:34.935;
+#SAMPLELENGTH:15;
+#BPMS:0=182;
+
+#NOTES:
+     dance-single:
+     :
+     Beginner:
+     5:
+     :
+0000
+0000
+0000
+0000
+";
+        let parsed = file.parse::<StepChart>();
+        assert_eq!(parsed.unwrap_err(), StepParseError::UnauthoredSong);
+    }
+
+    #[test]
+    fn test_lacking_bpm() {
+        let file_1 = "
+//----- song ID: pure -----//
+#ARTIST:PHQUASE;
+#TITLE:プレインエイジア -PHQ remix-;
+#TITLETRANSLIT:Plain Asia -PHQ remix-;
+#BANNER:Plain Asia -PHQ remix-.png;
+#BACKGROUND:Plain Asia -PHQ remix--bg.png;
+#CDTITLE:./CDTitles/BEMANI x Toho Project Ultimate MasterPieces (2015).png;
+#MUSIC:Plain Asia -PHQ remix-.ogg;
+#SAMPLESTART:34.935;
+#SAMPLELENGTH:15;
+
+#NOTES:
+     dance-single:
+     :
+     Beginner:
+     5:
+     :
+0000
+0000
+0000
+0000
+";
+        let parsed_1 = file_1.parse::<StepChart>();
+        assert_eq!(parsed_1.unwrap_err(), StepParseError::MissingBpm);
+        let file_2 = "
+//----- song ID: pure -----//
+#ARTIST:PHQUASE;
+#TITLE:プレインエイジア -PHQ remix-;
+#TITLETRANSLIT:Plain Asia -PHQ remix-;
+#BANNER:Plain Asia -PHQ remix-.png;
+#BACKGROUND:Plain Asia -PHQ remix--bg.png;
+#CDTITLE:./CDTitles/BEMANI x Toho Project Ultimate MasterPieces (2015).png;
+#MUSIC:Plain Asia -PHQ remix-.ogg;
+#SAMPLESTART:34.935;
+#SAMPLELENGTH:15;
+#BPMS:;
+
+#NOTES:
+     dance-single:
+     :
+     Beginner:
+     5:
+     :
+0000
+0000
+0000
+0000
+";
+        let parsed_2 = file_2.parse::<StepChart>();
+        assert_eq!(parsed_2.unwrap_err(), StepParseError::FractionPairParseIssue);
+    }
+
+    #[test]
+    fn test_bad_fraction_pair_cases() {
+        let bpm_file = "
+//----- song ID: pure -----//
+#ARTIST:PHQUASE;
+#TITLE:プレインエイジア -PHQ remix-;
+#TITLETRANSLIT:Plain Asia -PHQ remix-;
+#BANNER:Plain Asia -PHQ remix-.png;
+#BACKGROUND:Plain Asia -PHQ remix--bg.png;
+#CDTITLE:./CDTitles/BEMANI x Toho Project Ultimate MasterPieces (2015).png;
+#MUSIC:Plain Asia -PHQ remix-.ogg;
+#SAMPLESTART:34.935;
+#SAMPLELENGTH:15;
+#BPMS:0$182;
+
+#NOTES:
+     dance-single:
+     :
+     Beginner:
+     5:
+     :
+0000
+0000
+0000
+0000
+";
+        let bpm_parsed = bpm_file.parse::<StepChart>();
+        assert_eq!(
+            bpm_parsed.unwrap_err(),
+            StepParseError::FractionPairParseIssue
+        );
+
+        let stops_file = "
+//----- song ID: algo -----//
+#TITLE:ALGORITHM;
+#ARTIST:SOUND HOLIC feat. Nana Takahashi;
+#BANNER:ALGORITHM.png;
+#BACKGROUND:ALGORITHM-bg.png;
+#CDTITLE:./CDTitles/DDR A.png;
+#MUSIC:ALGORITHM.ogg;
+#SAMPLESTART:67.833;
+#SAMPLELENGTH:15;
+#BPMS:0=130;
+#STOPS:218$0.231,218.5$0.231;
+
+#NOTES:
+     dance-single:
+     :
+     Beginner:
+     5:
+     :
+0000
+0000
+0000
+0000
+";
+        let stops_parsed = stops_file.parse::<StepChart>();
+        assert_eq!(
+            stops_parsed.unwrap_err(),
+            StepParseError::FractionPairParseIssue
+        );
+    }
 }
