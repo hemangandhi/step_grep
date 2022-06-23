@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error;
 use std::fmt;
 use std::fs;
@@ -7,23 +7,45 @@ use std::mem;
 use std::path::Path;
 use std::str::FromStr;
 
-use fraction::error::ParseError;
-use fraction::Fraction;
+use fraction::ParseRatioError;
+use fraction::Ratio;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub enum SongSpecifierIssue {
+    IncorrectNumberOfParts,
+    InvalidFirstPart,
+    InvalidMode,
+    InvalidLevelNumber,
+}
+
+impl fmt::Display for SongSpecifierIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SongSpecifierIssue::IncorrectNumberOfParts => {
+                write!(f, "Expected 7 colon-delimited parts")
+            }
+            SongSpecifierIssue::InvalidFirstPart => write!(f, "Expected first bit to be 'NOTES'"),
+            SongSpecifierIssue::InvalidMode => write!(f, "Bad song mode"),
+            SongSpecifierIssue::InvalidLevelNumber => write!(f, "Unparsable level number"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum StepParseError {
     NonSmFile(String),
     BadOsStr(String),
     UntitledSong,
     UnauthoredSong,
     MissingBpm,
+    MissingStepCharts,
     FractionPairParseIssue,
-    FractionParseError(ParseError),
-    InvalidSongLevelSpecifier(String),
-    HandsRequired(Fraction),
-    UnparsableLine(Fraction, String),
-    NoteAlreadyPressed(Fraction, Fraction),
-    UnopennedHoldClose(Fraction),
+    FractionParseError(ParseRatioError),
+    InvalidSongLevelSpecifier(String, SongSpecifierIssue),
+    HandsRequired(Ratio<u64>),
+    UnparsableLine(Ratio<u64>, String),
+    NoteAlreadyPressed(Ratio<u64>, Ratio<u64>),
+    UnopennedHoldClose(Ratio<u64>),
 }
 
 impl fmt::Display for StepParseError {
@@ -36,14 +58,19 @@ impl fmt::Display for StepParseError {
             StepParseError::UntitledSong => write!(f, "Found song without title"),
             StepParseError::UnauthoredSong => write!(f, "Found song without author"),
             StepParseError::MissingBpm => write!(f, "Found song without BPM"),
+            StepParseError::MissingStepCharts => write!(f, "Found song without any step charts."),
             StepParseError::FractionPairParseIssue => {
                 write!(f, "Can't parse speed changes, invalid pair")
             }
             StepParseError::FractionParseError(fpe) => {
                 write!(f, "Can't parse speed changes, invalid fraction: {}", fpe)
             }
-            StepParseError::InvalidSongLevelSpecifier(spec) => {
-                write!(f, "Can't parse song level specifier: \"{}\"", spec)
+            StepParseError::InvalidSongLevelSpecifier(spec, error) => {
+                write!(
+                    f,
+                    "Can't parse song level specifier ({}): \"{}\"",
+                    error, spec
+                )
             }
             StepParseError::HandsRequired(beat) => {
                 write!(f, "Hands required at beat {}", beat)
@@ -73,8 +100,8 @@ impl From<StepParseError> for Error {
     }
 }
 
-impl From<ParseError> for StepParseError {
-    fn from(item: ParseError) -> Self {
+impl From<ParseRatioError> for StepParseError {
+    fn from(item: ParseRatioError) -> Self {
         StepParseError::FractionParseError(item)
     }
 }
@@ -100,11 +127,11 @@ impl Note {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-pub struct Duration(Fraction);
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Duration(Ratio<u64>);
 
 // TODO: rolls? mines?
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct StepNote {
     pub note: Note,
     pub hold_duration: Option<Duration>,
@@ -115,15 +142,36 @@ impl StepNote {
         self.note.is_doubles()
     }
 
-    fn adjust_time(&self, timing: Fraction) -> Fraction {
+    fn adjust_time(&self, timing: Ratio<u64>) -> Ratio<u64> {
         timing - self.hold_duration.map(|d| d.0).unwrap_or(0.into())
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq)]
 pub enum Step {
     Note(StepNote),
     Chord(StepNote, StepNote),
+}
+
+impl PartialEq for Step {
+    fn eq(&self, other: &Self) -> bool {
+        match self {
+            Step::Note(sn) => {
+                if let Step::Note(on) = other {
+                    sn == on
+                } else {
+                    false
+                }
+            }
+            Step::Chord(sl, sr) => {
+                if let Step::Chord(ol, or) = other {
+                    (ol == sl && or == sr) || (ol == sr && or == sl)
+                } else {
+                    false
+                }
+            }
+        }
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -150,18 +198,33 @@ fn line_state_of_line(s: &str, is_doubles: bool) -> Option<Vec<(Note, LineState)
     let v = s
         .chars()
         .enumerate()
-        .map(|(pos, state)| {
-            let state_idx = (state.to_digit(10)? as usize) - 1;
+        .filter_map(|(pos, state)| {
+            // On a Galois inclusion:
+            // filter_map and then the collect makes this return
+            // Option<Option<Vec<_>>>, where the outer option is
+            // about whether the value should be included, and the
+            // inner one is about whether the outer function should
+            // report an error in parsing this line.
+            let state_idx = match state.to_digit(10) {
+                None => return Some(None),
+                Some(x) => {
+                    if x == 0 {
+                        return None;
+                    } else {
+                        (x as usize) - 1
+                    }
+                }
+            };
             if pos >= n_notes {
-                return None;
+                return Some(None);
             }
             if state_idx >= NOTE_STATES.len() {
-                return None;
+                return Some(None);
             }
-            Some((NOTE_POSITIONS[pos], NOTE_STATES[state_idx]))
+            Some(Some((NOTE_POSITIONS[pos], NOTE_STATES[state_idx])))
         })
         .collect::<Option<Vec<(Note, LineState)>>>()?;
-    if v.len() == 2 {
+    if v.len() <= 2 {
         Some(v)
     } else {
         None
@@ -185,7 +248,7 @@ impl Step {
         None
     }
 
-    fn emplace_into_map(self, timing: Fraction, steps: &mut HashMap<Fraction, Step>) {
+    fn emplace_into_map(self, timing: Ratio<u64>, steps: &mut BTreeMap<Ratio<u64>, Step>) {
         let key = match self {
             Step::Note(n) => n.adjust_time(timing),
             Step::Chord(l, r) => {
@@ -216,8 +279,8 @@ impl Step {
 
 enum HoldState {
     NoHolds,
-    OneHold(Fraction, Note),
-    TwoHolds(Fraction, Note, Fraction, Note),
+    OneHold(Ratio<u64>, Note),
+    TwoHolds(Ratio<u64>, Note, Ratio<u64>, Note),
 }
 
 impl HoldState {
@@ -233,7 +296,7 @@ impl HoldState {
         }
     }
 
-    fn note_timing(&self, n: &Note) -> Option<Fraction> {
+    fn note_timing(&self, n: &Note) -> Option<Ratio<u64>> {
         match self {
             HoldState::NoHolds => None,
             HoldState::OneHold(t, held_n) => {
@@ -255,7 +318,7 @@ impl HoldState {
         }
     }
 
-    fn promote(&mut self, t: Fraction, n: Note) {
+    fn promote(&mut self, t: Ratio<u64>, n: Note) {
         let new_state = match self {
             HoldState::NoHolds => HoldState::OneHold(t, n),
             HoldState::OneHold(og_t, og_n) => HoldState::TwoHolds(*og_t, *og_n, t, n),
@@ -266,7 +329,7 @@ impl HoldState {
         mem::replace(self, new_state);
     }
 
-    fn demote(&mut self, n: &Note) -> Option<Fraction> {
+    fn demote(&mut self, n: &Note) -> Option<Ratio<u64>> {
         let (new_state, fraction) = match self {
             HoldState::OneHold(og_t, og_n) => {
                 if og_n == n {
@@ -294,10 +357,10 @@ impl HoldState {
 
     fn update_holds(
         &mut self,
-        time: Fraction,
+        time: Ratio<u64>,
         line: &str,
         is_doubles: bool,
-        steps: &mut HashMap<Fraction, Step>,
+        steps: &mut BTreeMap<Ratio<u64>, Step>,
     ) -> Option<StepParseError> {
         let state = line_state_of_line(line, is_doubles);
         if state.is_none() {
@@ -360,9 +423,20 @@ impl SongLevel {
 
     // We don't implement the trait since we do not actually want to use this as a standard format.
     fn from_str(key: &str) -> Result<Self, StepParseError> {
-        let bits: Vec<_> = key.split(':').collect();
-        if bits.len() != 6 || bits[0] == "NOTES" {
-            return Err(StepParseError::InvalidSongLevelSpecifier(key.to_string()));
+        let bits: Vec<_> = key.split(':').map(|b| b.trim()).collect();
+        // 7 bits:
+        // ["NOTES", "dance-{single|double}", "", "<string of level difficulty>", "{\d+}", "", ""]
+        if bits.len() != 7 {
+            return Err(StepParseError::InvalidSongLevelSpecifier(
+                key.to_string(),
+                SongSpecifierIssue::IncorrectNumberOfParts,
+            ));
+        }
+        if bits[0] != "NOTES" {
+            return Err(StepParseError::InvalidSongLevelSpecifier(
+                key.to_string(),
+                SongSpecifierIssue::InvalidFirstPart,
+            ));
         }
         let is_doubles = {
             if bits[1] == "dance-single" {
@@ -370,12 +444,18 @@ impl SongLevel {
             } else if bits[1] == "dance-double" {
                 true
             } else {
-                return Err(StepParseError::InvalidSongLevelSpecifier(key.to_string()));
+                return Err(StepParseError::InvalidSongLevelSpecifier(
+                    key.to_string(),
+                    SongSpecifierIssue::InvalidMode,
+                ));
             }
         };
-        let lvl: u8 = bits[4]
-            .parse()
-            .map_err(|_| StepParseError::InvalidSongLevelSpecifier(key.to_string()))?;
+        let lvl: u8 = bits[4].parse().map_err(|_| {
+            StepParseError::InvalidSongLevelSpecifier(
+                key.to_string(),
+                SongSpecifierIssue::InvalidLevelNumber,
+            )
+        })?;
         if is_doubles {
             Ok(SongLevel::Double(lvl))
         } else {
@@ -384,13 +464,13 @@ impl SongLevel {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, PartialEq, Eq)]
 pub struct StepChart {
     pub title: String,
     pub artist: String,
-    pub bpms: HashMap<Fraction, Fraction>,
-    pub stops: HashMap<Fraction, Fraction>,
-    pub maps: HashMap<SongLevel, HashMap<Fraction, Step>>,
+    pub bpms: BTreeMap<Ratio<u64>, Ratio<u64>>,
+    pub stops: BTreeMap<Ratio<u64>, Ratio<u64>>,
+    pub maps: HashMap<SongLevel, BTreeMap<Ratio<u64>, Step>>,
 }
 
 fn GetFilePath(path: &Path) -> Result<String, StepParseError> {
@@ -418,7 +498,7 @@ impl StepChart {
     }
 }
 
-fn to_fraction_map(val: &str) -> Result<HashMap<Fraction, Fraction>, StepParseError> {
+fn to_fraction_map(val: &str) -> Result<BTreeMap<Ratio<u64>, Ratio<u64>>, StepParseError> {
     val.split(',')
         .map(|pair| {
             let delim = pair
@@ -432,31 +512,31 @@ fn to_fraction_map(val: &str) -> Result<HashMap<Fraction, Fraction>, StepParseEr
 fn parse_steps(
     steps_str: &str,
     song_level: &SongLevel,
-) -> Result<HashMap<Fraction, Step>, StepParseError> {
-    let mut steps = HashMap::new();
+) -> Result<BTreeMap<Ratio<u64>, Step>, StepParseError> {
+    let mut steps = BTreeMap::new();
     let mut hold_state = HoldState::new();
-    let mut dist: Fraction = 0.into();
+    let mut dist: Ratio<u64> = 0.into();
     for measure in steps_str
         .split(',')
         .map(|blk| blk.trim().split('\n').collect::<Vec<_>>())
     {
-        let line_rate = Fraction::new(4u64, measure.len() as u64);
+        let line_rate = Ratio::new(4u64, measure.len() as u64);
         for (measure_idx, line) in measure.into_iter().enumerate() {
-            let timing = line_rate * (measure_idx as u64).into() + dist;
+            let timing = line_rate * Ratio::new(measure_idx as u64, 1) + dist;
             if let Some(err) =
                 hold_state.update_holds(timing, line, song_level.is_doubles(), &mut steps)
             {
                 return Err(err);
             }
         }
-        dist += Fraction::new(4u64, 1u64);
+        dist += Ratio::new(4u64, 1u64);
     }
     Ok(steps)
 }
 
 fn parse_maps(
-    notes: &HashMap<&str, &str>,
-) -> Result<HashMap<SongLevel, HashMap<Fraction, Step>>, StepParseError> {
+    notes: &BTreeMap<&str, &str>,
+) -> Result<HashMap<SongLevel, BTreeMap<Ratio<u64>, Step>>, StepParseError> {
     notes
         .into_iter()
         .filter(|(&k, &v_)| k.starts_with("NOTES"))
@@ -472,7 +552,7 @@ impl FromStr for StepChart {
     type Err = StepParseError;
 
     fn from_str(s: &str) -> Result<Self, StepParseError> {
-        let parts: HashMap<&str, &str> = s
+        let parts: BTreeMap<&str, &str> = s
             .split('#')
             .filter_map(|ln| {
                 // TODO: detect the comment line at the top of the file
@@ -500,7 +580,11 @@ impl FromStr for StepChart {
             final_chart.stops = to_fraction_map(stop_str)?;
         }
         final_chart.maps = parse_maps(&parts)?;
-        Ok(final_chart)
+        if final_chart.maps.is_empty() {
+            Err(StepParseError::MissingStepCharts)
+        } else {
+            Ok(final_chart)
+        }
     }
 }
 
@@ -623,7 +707,10 @@ mod test {
 0000
 ";
         let parsed_2 = file_2.parse::<StepChart>();
-        assert_eq!(parsed_2.unwrap_err(), StepParseError::FractionPairParseIssue);
+        assert_eq!(
+            parsed_2.unwrap_err(),
+            StepParseError::FractionPairParseIssue
+        );
     }
 
     #[test]
@@ -686,6 +773,205 @@ mod test {
         assert_eq!(
             stops_parsed.unwrap_err(),
             StepParseError::FractionPairParseIssue
+        );
+    }
+
+    #[test]
+    fn test_bad_song_levels_colons() {
+        let fewer_file = "
+//----- song ID: pure -----//
+#ARTIST:PHQUASE;
+#TITLE:プレインエイジア -PHQ remix-;
+#TITLETRANSLIT:Plain Asia -PHQ remix-;
+#BANNER:Plain Asia -PHQ remix-.png;
+#BACKGROUND:Plain Asia -PHQ remix--bg.png;
+#CDTITLE:./CDTitles/BEMANI x Toho Project Ultimate MasterPieces (2015).png;
+#MUSIC:Plain Asia -PHQ remix-.ogg;
+#SAMPLESTART:34.935;
+#SAMPLELENGTH:15;
+#BPMS:0=182;
+
+#NOTES:
+     dance-single:
+     Beginner:
+     5:
+     :
+0000
+0000
+0000
+0000
+; ";
+        let fewer_parsed = fewer_file.parse::<StepChart>();
+        assert_eq!(
+            fewer_parsed.unwrap_err(),
+            StepParseError::InvalidSongLevelSpecifier(
+                "NOTES:
+     dance-single:
+     Beginner:
+     5:
+     :"
+                .to_string(),
+                SongSpecifierIssue::IncorrectNumberOfParts
+            )
+        );
+
+        let more_file = "
+//----- song ID: pure -----//
+#ARTIST:PHQUASE;
+#TITLE:プレインエイジア -PHQ remix-;
+#TITLETRANSLIT:Plain Asia -PHQ remix-;
+#BANNER:Plain Asia -PHQ remix-.png;
+#BACKGROUND:Plain Asia -PHQ remix--bg.png;
+#CDTITLE:./CDTitles/BEMANI x Toho Project Ultimate MasterPieces (2015).png;
+#MUSIC:Plain Asia -PHQ remix-.ogg;
+#SAMPLESTART:34.935;
+#SAMPLELENGTH:15;
+#BPMS:0=182;
+
+#NOTES:
+     dance-single:
+     ::
+     Beginner:
+     5:
+     :
+0000
+0000
+0000
+0000
+; ";
+        let more_parsed = more_file.parse::<StepChart>();
+        assert_eq!(
+            more_parsed.unwrap_err(),
+            StepParseError::InvalidSongLevelSpecifier(
+                "NOTES:
+     dance-single:
+     ::
+     Beginner:
+     5:
+     :"
+                .to_string(),
+                SongSpecifierIssue::IncorrectNumberOfParts
+            )
+        );
+    }
+
+    #[test]
+    fn test_bad_song_levels_bits() {
+        let fewer_file = "
+//----- song ID: pure -----//
+#ARTIST:PHQUASE;
+#TITLE:プレインエイジア -PHQ remix-;
+#TITLETRANSLIT:Plain Asia -PHQ remix-;
+#BANNER:Plain Asia -PHQ remix-.png;
+#BACKGROUND:Plain Asia -PHQ remix--bg.png;
+#CDTITLE:./CDTitles/BEMANI x Toho Project Ultimate MasterPieces (2015).png;
+#MUSIC:Plain Asia -PHQ remix-.ogg;
+#SAMPLESTART:34.935;
+#SAMPLELENGTH:15;
+#BPMS:0=182;
+
+#NOTES:
+     dance-triple:
+     :
+     Beginner:
+     5:
+     :
+0000
+0000
+0000
+0000
+; ";
+        let fewer_parsed = fewer_file.parse::<StepChart>();
+        assert_eq!(
+            fewer_parsed.unwrap_err(),
+            StepParseError::InvalidSongLevelSpecifier(
+                "NOTES:
+     dance-triple:
+     :
+     Beginner:
+     5:
+     :"
+                .to_string(),
+                SongSpecifierIssue::InvalidMode
+            )
+        );
+
+        let more_file = "
+//----- song ID: pure -----//
+#ARTIST:PHQUASE;
+#TITLE:プレインエイジア -PHQ remix-;
+#TITLETRANSLIT:Plain Asia -PHQ remix-;
+#BANNER:Plain Asia -PHQ remix-.png;
+#BACKGROUND:Plain Asia -PHQ remix--bg.png;
+#CDTITLE:./CDTitles/BEMANI x Toho Project Ultimate MasterPieces (2015).png;
+#MUSIC:Plain Asia -PHQ remix-.ogg;
+#SAMPLESTART:34.935;
+#SAMPLELENGTH:15;
+#BPMS:0=182;
+
+#NOTES:
+     dance-single:
+     :
+     Beginner:
+     dog:
+     :
+0000
+0000
+0000
+0000
+; ";
+        let more_parsed = more_file.parse::<StepChart>();
+        assert_eq!(
+            more_parsed.unwrap_err(),
+            StepParseError::InvalidSongLevelSpecifier(
+                "NOTES:
+     dance-single:
+     :
+     Beginner:
+     dog:
+     :"
+                .to_string(),
+                SongSpecifierIssue::InvalidLevelNumber
+            )
+        );
+    }
+
+    #[test]
+    fn test_sucessful_header_parse() {
+        let fewer_file = "
+//----- song ID: pure -----//
+#ARTIST:PHQUASE;
+#TITLE:プレインエイジア -PHQ remix-;
+#TITLETRANSLIT:Plain Asia -PHQ remix-;
+#BANNER:Plain Asia -PHQ remix-.png;
+#BACKGROUND:Plain Asia -PHQ remix--bg.png;
+#CDTITLE:./CDTitles/BEMANI x Toho Project Ultimate MasterPieces (2015).png;
+#MUSIC:Plain Asia -PHQ remix-.ogg;
+#SAMPLESTART:34.935;
+#SAMPLELENGTH:15;
+#BPMS:0=182;
+
+#NOTES:
+     dance-single:
+     :
+     Beginner:
+     5:
+     :
+0000
+0000
+0000
+0000
+; ";
+        let fewer_parsed = fewer_file.parse::<StepChart>();
+        assert_eq!(
+            fewer_parsed.unwrap(),
+            StepChart {
+                title: "プレインエイジア -PHQ remix-".to_string(),
+                artist: "PHQUASE".to_string(),
+                bpms: BTreeMap::from([(0.into(), 182.into())]),
+                stops: BTreeMap::new(),
+                maps: HashMap::from([(SongLevel::Single(5), BTreeMap::new())])
+            }
         );
     }
 }
