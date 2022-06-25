@@ -130,11 +130,17 @@ impl Note {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Duration(Ratio<u64>);
 
+impl<T: Into<Ratio<u64>>> From<T> for Duration {
+    fn from(item: T) -> Self {
+        Duration(item.into())
+    }
+}
+
 // TODO: rolls? mines?
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct StepNote {
     pub note: Note,
-    pub hold_duration: Option<Duration>,
+    pub hold_duration: Duration,
 }
 
 impl StepNote {
@@ -143,7 +149,7 @@ impl StepNote {
     }
 
     fn adjust_time(&self, timing: Ratio<u64>) -> Ratio<u64> {
-        timing - self.hold_duration.map(|d| d.0).unwrap_or(0.into())
+        timing - self.hold_duration.0
     }
 }
 
@@ -377,7 +383,7 @@ impl HoldState {
                     }
                     Step::Note(StepNote {
                         note,
-                        hold_duration: None,
+                        hold_duration: 0.into(),
                     })
                     .emplace_into_map(time, steps);
                 }
@@ -394,7 +400,7 @@ impl HoldState {
                     if let Some(first_time) = self.demote(&note) {
                         Step::Note(StepNote {
                             note,
-                            hold_duration: Some(Duration(time - first_time)),
+                            hold_duration: Duration(time - first_time),
                         })
                         .emplace_into_map(time, steps);
                     } else {
@@ -972,6 +978,110 @@ mod test {
                 stops: BTreeMap::new(),
                 maps: HashMap::from([(SongLevel::Single(5), BTreeMap::new())])
             }
+        );
+    }
+
+    #[test]
+    fn test_nested_holds() {
+        let notes = "
+2000
+0000
+0020
+0030
+,
+0002
+0003
+0020
+3030
+,
+0002
+0000
+0020
+0030
+,
+2000
+3000
+0020
+0033
+,
+0200
+0000
+0000
+0001
+0301
+0000
+0000
+0000";
+        let parsed = parse_steps(notes, &SongLevel::Single(9));
+        assert_eq!(
+            parsed.unwrap(),
+            BTreeMap::from([(
+                0.into(),
+                Step::Note(StepNote {
+                    note: Note::Left,
+                    hold_duration: 7.into()
+                })
+            ),(
+                2.into(),
+                Step::Note(StepNote {
+                    note: Note::Up,
+                    hold_duration: 1.into()
+                })
+            ),(
+                4.into(),
+                Step::Note(StepNote {
+                    note: Note::Right,
+                    hold_duration: 1.into()
+                })
+            ),(
+                6.into(),
+                Step::Note(StepNote {
+                    note: Note::Up,
+                    hold_duration: 1.into()
+                })
+            ),(
+                8.into(),
+                Step::Note(StepNote {
+                    note: Note::Right,
+                    hold_duration: 7.into()
+                })
+            ),(
+                10.into(),
+                Step::Note(StepNote {
+                    note: Note::Up,
+                    hold_duration: 1.into()
+                })
+            ),(
+                12.into(),
+                Step::Note(StepNote {
+                    note: Note::Left,
+                    hold_duration: 1.into()
+                })
+            ),(
+                14.into(),
+                Step::Note(StepNote {
+                    note: Note::Up,
+                    hold_duration: 1.into()
+                })
+            ),(
+                16.into(),
+                Step::Note(StepNote {
+                    note: Note::Down,
+                    hold_duration: 2.into()
+                })
+            ),(
+                Ratio::new(35, 2),
+                Step::Note(StepNote {
+                    note: Note::Right,
+                    hold_duration: 0.into()
+                })
+            ),(
+                18.into(),
+                Step::Note(StepNote {
+                    note: Note::Right,
+                    hold_duration: 0.into()
+                })
+            )])
         );
     }
 }
