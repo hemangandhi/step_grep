@@ -1015,73 +1015,85 @@ mod test {
         let parsed = parse_steps(notes, &SongLevel::Single(9));
         assert_eq!(
             parsed.unwrap(),
-            BTreeMap::from([(
-                0.into(),
-                Step::Note(StepNote {
-                    note: Note::Left,
-                    hold_duration: 7.into()
-                })
-            ),(
-                2.into(),
-                Step::Note(StepNote {
-                    note: Note::Up,
-                    hold_duration: 1.into()
-                })
-            ),(
-                4.into(),
-                Step::Note(StepNote {
-                    note: Note::Right,
-                    hold_duration: 1.into()
-                })
-            ),(
-                6.into(),
-                Step::Note(StepNote {
-                    note: Note::Up,
-                    hold_duration: 1.into()
-                })
-            ),(
-                8.into(),
-                Step::Note(StepNote {
-                    note: Note::Right,
-                    hold_duration: 7.into()
-                })
-            ),(
-                10.into(),
-                Step::Note(StepNote {
-                    note: Note::Up,
-                    hold_duration: 1.into()
-                })
-            ),(
-                12.into(),
-                Step::Note(StepNote {
-                    note: Note::Left,
-                    hold_duration: 1.into()
-                })
-            ),(
-                14.into(),
-                Step::Note(StepNote {
-                    note: Note::Up,
-                    hold_duration: 1.into()
-                })
-            ),(
-                16.into(),
-                Step::Note(StepNote {
-                    note: Note::Down,
-                    hold_duration: 2.into()
-                })
-            ),(
-                Ratio::new(35, 2),
-                Step::Note(StepNote {
-                    note: Note::Right,
-                    hold_duration: 0.into()
-                })
-            ),(
-                18.into(),
-                Step::Note(StepNote {
-                    note: Note::Right,
-                    hold_duration: 0.into()
-                })
-            )])
+            BTreeMap::from([
+                (
+                    0.into(),
+                    Step::Note(StepNote {
+                        note: Note::Left,
+                        hold_duration: 7.into()
+                    })
+                ),
+                (
+                    2.into(),
+                    Step::Note(StepNote {
+                        note: Note::Up,
+                        hold_duration: 1.into()
+                    })
+                ),
+                (
+                    4.into(),
+                    Step::Note(StepNote {
+                        note: Note::Right,
+                        hold_duration: 1.into()
+                    })
+                ),
+                (
+                    6.into(),
+                    Step::Note(StepNote {
+                        note: Note::Up,
+                        hold_duration: 1.into()
+                    })
+                ),
+                (
+                    8.into(),
+                    Step::Note(StepNote {
+                        note: Note::Right,
+                        hold_duration: 7.into()
+                    })
+                ),
+                (
+                    10.into(),
+                    Step::Note(StepNote {
+                        note: Note::Up,
+                        hold_duration: 1.into()
+                    })
+                ),
+                (
+                    12.into(),
+                    Step::Note(StepNote {
+                        note: Note::Left,
+                        hold_duration: 1.into()
+                    })
+                ),
+                (
+                    14.into(),
+                    Step::Note(StepNote {
+                        note: Note::Up,
+                        hold_duration: 1.into()
+                    })
+                ),
+                (
+                    16.into(),
+                    Step::Note(StepNote {
+                        note: Note::Down,
+                        hold_duration: 2.into()
+                    })
+                ),
+                (
+                    Ratio::new(35, 2),
+                    Step::Note(StepNote {
+                        note: Note::Right,
+                        hold_duration: 0.into()
+                    })
+                ),
+                (
+                    18.into(),
+                    Step::Note(StepNote {
+                        note: Note::Right,
+                        hold_duration: 0.into()
+                    })
+                )
+            ])
         );
     }
 }
