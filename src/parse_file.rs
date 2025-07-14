@@ -276,7 +276,7 @@ impl Step {
             .entry(key)
             .and_modify(|to_chord| {
                 if let Some(ch) = self.merge_into_chord(*to_chord) {
-                    mem::replace(to_chord, ch);
+                    let _ = mem::replace(to_chord, ch);
                 }
             })
             .or_insert(self);
@@ -332,7 +332,7 @@ impl HoldState {
                 return;
             }
         };
-        mem::replace(self, new_state);
+        let _ = mem::replace(self, new_state);
     }
 
     fn demote(&mut self, n: &Note) -> Option<Ratio<u64>> {
@@ -357,7 +357,7 @@ impl HoldState {
                 return None;
             }
         };
-        mem::replace(self, new_state);
+        let _ = mem::replace(self, new_state);
         Some(fraction)
     }
 
@@ -479,7 +479,7 @@ pub struct StepChart {
     pub maps: HashMap<SongLevel, BTreeMap<Ratio<u64>, Step>>,
 }
 
-fn GetFilePath(path: &Path) -> Result<String, StepParseError> {
+fn get_file_path(path: &Path) -> Result<String, StepParseError> {
     if let Some(name_os_str) = path.file_name() {
         if let Some(name) = name_os_str.to_str() {
             Result::Ok(name.to_string())
@@ -545,7 +545,7 @@ fn parse_maps(
 ) -> Result<HashMap<SongLevel, BTreeMap<Ratio<u64>, Step>>, StepParseError> {
     notes
         .into_iter()
-        .filter(|(&k, &v_)| k.starts_with("NOTES"))
+        .filter(|(&k, &_v)| k.starts_with("NOTES"))
         .map(|(k, v)| {
             let lvl = SongLevel::from_str(k)?;
             let steps = parse_steps(v, &lvl)?;
