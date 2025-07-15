@@ -125,6 +125,15 @@ impl Note {
             _ => true,
         }
     }
+
+    pub fn get_char(&self) -> char {
+        match &self {
+            Note::Up | Note::RPadUp => 'u',
+            Note::Down | Note::RPadDown => 'd',
+            Note::Left | Note::RPadLeft => 'l',
+            Note::Right | Note::RPadRight => 'r',
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
