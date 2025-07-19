@@ -32,6 +32,19 @@ mod test {
 
     #[test]
     fn test_nqueen_search() {
+        const QUEENS_SOLUTIONS: [[u8; 5]; 10] = [
+            [0, 2, 4, 1, 3],
+            [0, 3, 1, 4, 2],
+            [1, 3, 0, 2, 4],
+            [1, 4, 2, 0, 3],
+            [2, 0, 3, 1, 4],
+            [2, 4, 1, 3, 0],
+            [3, 0, 2, 4, 1],
+            [3, 1, 4, 2, 0],
+            [4, 1, 3, 0, 2],
+            [4, 2, 0, 3, 1],
+        ];
+
         fn expand_queens(q: Vec<u8>, c: &usize) -> Result<Vec<Vec<u8>>, ()> {
             let states: Vec<Vec<u8>> = (0..5u8)
                 .filter_map(|r| {
@@ -57,8 +70,18 @@ mod test {
             (0..5u8).map(|r| vec![r]).collect(),
             1..5usize,
             expand_queens,
-        );
-        assert!(queens.is_ok());
-        println!("Queens! {:?}", queens);
+        )
+        .unwrap();
+        assert!(queens.len() == 10);
+        let missing: Vec<&[u8; 5]> = QUEENS_SOLUTIONS
+            .iter()
+            .filter(|s| !queens.contains(&s.iter().cloned().collect()))
+            .collect();
+        assert!(missing.is_empty());
+        let extra: Vec<&Vec<u8>> = queens
+            .iter()
+            .filter(|s| s.len() != 5 || !QUEENS_SOLUTIONS.contains(&[s[0], s[1], s[2], s[3], s[4]]))
+            .collect();
+        assert!(extra.is_empty());
     }
 }
