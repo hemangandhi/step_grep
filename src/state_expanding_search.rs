@@ -30,23 +30,9 @@ pub fn search<T, I, E>(
 mod test {
     use super::*;
 
-    #[test]
-    fn test_nqueen_search() {
-        const QUEENS_SOLUTIONS: [[u8; 5]; 10] = [
-            [0, 2, 4, 1, 3],
-            [0, 3, 1, 4, 2],
-            [1, 3, 0, 2, 4],
-            [1, 4, 2, 0, 3],
-            [2, 0, 3, 1, 4],
-            [2, 4, 1, 3, 0],
-            [3, 0, 2, 4, 1],
-            [3, 1, 4, 2, 0],
-            [4, 1, 3, 0, 2],
-            [4, 2, 0, 3, 1],
-        ];
-
-        fn expand_queens(q: Vec<u8>, c: &usize) -> Result<Vec<Vec<u8>>, ()> {
-            let states: Vec<Vec<u8>> = (0..5u8)
+    fn expand_queens_upto(n: u8) -> impl Fn(Vec<u8>, &usize) -> Result<Vec<Vec<u8>>, ()> {
+        move |q: Vec<u8>, c: &usize| -> Result<Vec<Vec<u8>>, ()> {
+            let states: Vec<Vec<u8>> = (0..n)
                 .filter_map(|r| {
                     if q.iter().enumerate().any(|(qc, qr)| {
                         let row_dist = if *qr < r { r - qr } else { qr - r };
@@ -65,11 +51,27 @@ mod test {
                 Ok(states)
             }
         }
+    }
+
+    #[test]
+    fn test_nqueen_search() {
+        const QUEENS_SOLUTIONS: [[u8; 5]; 10] = [
+            [0, 2, 4, 1, 3],
+            [0, 3, 1, 4, 2],
+            [1, 3, 0, 2, 4],
+            [1, 4, 2, 0, 3],
+            [2, 0, 3, 1, 4],
+            [2, 4, 1, 3, 0],
+            [3, 0, 2, 4, 1],
+            [3, 1, 4, 2, 0],
+            [4, 1, 3, 0, 2],
+            [4, 2, 0, 3, 1],
+        ];
 
         let queens = search(
             (0..5u8).map(|r| vec![r]).collect(),
             1..5usize,
-            expand_queens,
+            expand_queens_upto(5),
         )
         .unwrap();
         assert!(queens.len() == 10);
@@ -83,5 +85,16 @@ mod test {
             .filter(|s| s.len() != 5 || !QUEENS_SOLUTIONS.contains(&[s[0], s[1], s[2], s[3], s[4]]))
             .collect();
         assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn test_nqueens_not_found() {
+        let no_queens = search(
+            (0..3u8).map(|r| vec![r]).collect(),
+            1..3usize,
+            expand_queens_upto(3),
+        );
+        println!("{:?}", no_queens);
+        assert!(!no_queens.is_ok());
     }
 }
