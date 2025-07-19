@@ -93,8 +93,8 @@ mod test {
             (0..3u8).map(|r| vec![r]).collect(),
             1..3usize,
             expand_queens_upto(3),
-        );
-        println!("{:?}", no_queens);
-        assert!(!no_queens.is_ok());
+        )
+        .unwrap_err();
+        assert!(no_queens.len() == 2);
     }
 }

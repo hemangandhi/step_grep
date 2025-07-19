@@ -21,6 +21,7 @@ impl std::fmt::Display for StepAllocation {
     }
 }
 
+#[derive(std::default::Default)]
 pub struct SongStepAllocation(BTreeMap<Ratio<u64>, StepAllocation>);
 
 impl std::fmt::Display for SongStepAllocation {
@@ -29,5 +30,23 @@ impl std::fmt::Display for SongStepAllocation {
             write!(f, "{}", allocation)?;
         }
         Ok(())
+    }
+}
+
+pub enum StepAllocationError {
+    Hands(Ratio<u64>),
+}
+
+impl SongStepAllocation {
+    fn extend(&mut self, time: Ratio<u64>, step: parse_file::Step) -> Option<StepAllocationError> {
+        todo!()
+    }
+}
+
+impl std::convert::TryFrom<BTreeMap<Ratio<u64>, parse_file::Step>> for SongStepAllocation {
+    type Error = Vec<StepAllocationError>;
+
+    fn try_from(value: BTreeMap<Ratio<u64>, parse_file::Step>) -> Result<Self, Self::Error> {
+        todo!("Use the state_expanding_search here")
     }
 }
