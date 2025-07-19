@@ -30,8 +30,8 @@ pub fn search<T, I, E>(
 mod test {
     use super::*;
 
-    fn expand_queens_upto(n: u8) -> impl Fn(Vec<u8>, &usize) -> Result<Vec<Vec<u8>>, ()> {
-        move |q: Vec<u8>, c: &usize| -> Result<Vec<Vec<u8>>, ()> {
+    fn expand_queens_upto(n: u8) -> impl Fn(Vec<u8>, &usize) -> Result<Vec<Vec<u8>>, Vec<u8>> {
+        move |q: Vec<u8>, c: &usize| -> Result<Vec<Vec<u8>>, Vec<u8>> {
             let states: Vec<Vec<u8>> = (0..n)
                 .filter_map(|r| {
                     if q.iter().enumerate().any(|(qc, qr)| {
@@ -46,7 +46,7 @@ mod test {
                 })
                 .collect();
             if states.is_empty() {
-                Err(())
+                Err(q)
             } else {
                 Ok(states)
             }
@@ -96,5 +96,12 @@ mod test {
         )
         .unwrap_err();
         assert!(no_queens.len() == 2);
+        let mut expected_error: Vec<Vec<u8>> = vec![vec![0, 2], vec![2, 0]];
+        assert!(
+            no_queens == expected_error || {
+                expected_error.reverse();
+                no_queens == expected_error
+            }
+        );
     }
 }
